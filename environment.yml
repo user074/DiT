@@ -3,11 +3,14 @@ channels:
   - pytorch
   - nvidia
 dependencies:
-  - python >= 3.8
-  - pytorch >= 1.13
+  - python >= 3.10
+  - pytorch >= 2.0
   - torchvision
   - pytorch-cuda=11.7
   - pip:
     - timm
     - diffusers
     - accelerate
+
+#Additional notes: I installed pytorch 2.2 with CUDA11.8 since the conda wont install GPU version
+#timm also optimized flashattention for pytorch >= 2.0
