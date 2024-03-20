@@ -367,7 +367,7 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
-            elif epoch == args.epochs - 1:
+            elif epoch == args.epochs - 1 and train_steps % int(len(dataset)/ args.global_batch_size) == 0:
                 if rank == 0:
                     checkpoint = {
                         "model": model.module.state_dict(),

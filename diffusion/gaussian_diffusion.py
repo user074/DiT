@@ -242,18 +242,26 @@ class GaussianDiffusion:
         Compute the mean and variance of the diffusion posterior:
             q(x_{t-1} | x_t, x_0)
         """
-        assert x_start.shape == x_t.shape == x_end.shape
+        if x_end is not None:
+            assert x_start.shape == x_t.shape == x_end.shape
 
-        # Compute the interpolation factor based on the diffusion step t
-        factor = t / self.num_timesteps
-        # Interpolate between x_start and x_end using the factor
-        factor = factor.view(-1, *([1] * (len(x_start.shape) - 1)))
-        x_interp = (1 - factor) * x_start + factor * x_end
+            # Compute the interpolation factor based on the diffusion step t
+            factor = t / self.num_timesteps
+            # Interpolate between x_start and x_end using the factor
+            factor = factor.view(-1, *([1] * (len(x_start.shape) - 1)))
+            x_interp = (1 - factor) * x_start + factor * x_end
 
-        posterior_mean = (
-            _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_interp
-            + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
+            posterior_mean = (
+                _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_interp
+                + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+            )
+        else:
+            assert x_start.shape == x_t.shape
+            posterior_mean = (
+                _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
+                + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+            )
+            
         posterior_variance = _extract_into_tensor(self.posterior_variance, t, x_t.shape)
         posterior_log_variance_clipped = _extract_into_tensor(
             self.posterior_log_variance_clipped, t, x_t.shape
@@ -342,7 +350,7 @@ class GaussianDiffusion:
             x_interp = (1 - factor) * x_start + factor * x_end
             model_mean, _, _ = self.q_posterior_mean_variance(x_start=x_interp, x_end=x_end, x_t=x, t=t)
         else:
-            model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart, x_t=x, t=t)
+            model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart, x_end=None, x_t=x, t=t)
 
         assert model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
         return {
