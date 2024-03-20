@@ -325,9 +325,10 @@ def main(args):
                 y = vae.encode(y).latent_dist.sample().mul_(0.18215)
 
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            # model_kwargs = dict(y=y)
-            model_kwargs = None
-            loss_dict = diffusion.training_losses(model, x, t, y, model_kwargs)
+            model_kwargs = dict(y= torch.ones(x.shape[0], dtype=torch.long, device=device))
+            # model_kwargs = None
+            #doing y, x since I want to use image to predict segmentation mask
+            loss_dict = diffusion.training_losses(model, y, x, t, model_kwargs) #added y as input to the model
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
             loss.backward()
@@ -366,6 +367,18 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
+            elif epoch == args.epochs - 1:
+                if rank == 0:
+                    checkpoint = {
+                        "model": model.module.state_dict(),
+                        "ema": ema.state_dict(),
+                        "opt": opt.state_dict(),
+                        "args": args
+                    }
+                    checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
+                    torch.save(checkpoint, checkpoint_path)
+                    logger.info(f"Saved checkpoint to {checkpoint_path}")
+                dist.barrier()
 
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
@@ -392,4 +405,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(args)
 
-#torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/4 --data-path /home/jqi/Github/Data/Data/coco
+#torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 100 --data-path /home/jqi/Github/Data/Data/coco
+    
+#nohup torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 20 --ckpt-every 18400 --data-path /home/jqi/Github/Data/Data/coco > output.log 2>&1 &
