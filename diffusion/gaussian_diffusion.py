@@ -212,6 +212,30 @@ class GaussianDiffusion:
         log_variance = _extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
 
+    # def q_sample(self, x_start, x_end, t, noise=None):
+    #     """
+    #     Diffuse the data for a given number of diffusion steps.
+    #     In other words, sample from q(x_t | x_0).
+    #     :param x_start: the initial data batch.
+    #     :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
+    #     :param noise: if specified, the split-out normal noise.
+    #     :return: A noisy version of x_start.
+    #     """
+    #     if noise is None:
+    #         noise = th.randn_like(x_start)
+    #     assert noise.shape == x_start.shape == x_end.shape
+
+    #     # Compute the interpolation factor based on the diffusion step t
+    #     factor = t / self.num_timesteps
+
+    #     # Interpolate between x_start and x_end using the factor
+    #     factor = factor.view(-1, *([1] * (len(x_start.shape) - 1)))
+    #     x_interp = (1 - factor) * x_start + factor * x_end
+
+    #     return (
+    #         _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_interp
+    #         + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
+    #     )
     def q_sample(self, x_start, x_end, t, noise=None):
         """
         Diffuse the data for a given number of diffusion steps.
@@ -222,46 +246,29 @@ class GaussianDiffusion:
         :return: A noisy version of x_start.
         """
         if noise is None:
-            noise = th.randn_like(x_start)
+            noise = th.randn_like(x_start) + x_end
+            #renormalize noise to have zero mean and unit variance
+            noise = (noise - noise.mean(dim=0)) / noise.std(dim=0)
+            
         assert noise.shape == x_start.shape == x_end.shape
 
-        # Compute the interpolation factor based on the diffusion step t
-        factor = t / self.num_timesteps
-
-        # Interpolate between x_start and x_end using the factor
-        factor = factor.view(-1, *([1] * (len(x_start.shape) - 1)))
-        x_interp = (1 - factor) * x_start + factor * x_end
-
         return (
-            _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_interp
+            _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
             + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def q_posterior_mean_variance(self, x_start, x_end, x_t, t):
+    def q_posterior_mean_variance(self, x_start, x_t, t):
         """
         Compute the mean and variance of the diffusion posterior:
             q(x_{t-1} | x_t, x_0)
         """
-        if x_end is not None:
-            assert x_start.shape == x_t.shape == x_end.shape
+        
+        assert x_start.shape == x_t.shape
+        posterior_mean = (
+            _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
+            + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+        )
 
-            # Compute the interpolation factor based on the diffusion step t
-            factor = t / self.num_timesteps
-            # Interpolate between x_start and x_end using the factor
-            factor = factor.view(-1, *([1] * (len(x_start.shape) - 1)))
-            x_interp = (1 - factor) * x_start + factor * x_end
-
-            posterior_mean = (
-                _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_interp
-                + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
-            )
-        else:
-            assert x_start.shape == x_t.shape
-            posterior_mean = (
-                _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
-                + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
-            )
-            
         posterior_variance = _extract_into_tensor(self.posterior_variance, t, x_t.shape)
         posterior_log_variance_clipped = _extract_into_tensor(
             self.posterior_log_variance_clipped, t, x_t.shape
@@ -274,7 +281,7 @@ class GaussianDiffusion:
         )
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(self, model, x, t, x_start=None, x_end=None, clip_denoised=True, denoised_fn=None, model_kwargs=None):
+    def p_mean_variance(self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None):
         """
         Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
         the initial x, x_0.
@@ -344,13 +351,8 @@ class GaussianDiffusion:
                 self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
             )
 
-        if x_start is not None:
-            factor = t / self.num_timesteps
-            factor = factor.view(-1, *([1] * (len(x_start.shape) - 1)))
-            x_interp = (1 - factor) * x_start + factor * x_end
-            model_mean, _, _ = self.q_posterior_mean_variance(x_start=x_interp, x_end=x_end, x_t=x, t=t)
-        else:
-            model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart, x_end=None, x_t=x, t=t)
+        
+        model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart, x_t=x, t=t)
 
         assert model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
         return {
@@ -711,7 +713,7 @@ class GaussianDiffusion:
                 img = out["sample"]
 
     def _vb_terms_bpd(
-            self, model, x_start, x_end, x_t, t, clip_denoised=True, model_kwargs=None
+            self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None
     ):
         """
         Get a term for the variational lower-bound.
@@ -722,10 +724,10 @@ class GaussianDiffusion:
                  - 'pred_xstart': the x_0 predictions.
         """
         true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(
-            x_start=x_start, x_end=x_end, x_t=x_t, t=t
+            x_start=x_start, x_t=x_t, t=t
         )
         out = self.p_mean_variance(
-            model, x_t, t, x_start, x_end, clip_denoised=clip_denoised, model_kwargs=model_kwargs
+            model, x_t, t, clip_denoised=clip_denoised, model_kwargs=model_kwargs
         )
         kl = normal_kl(
             true_mean, true_log_variance_clipped, out["mean"], out["log_variance"]
@@ -758,7 +760,10 @@ class GaussianDiffusion:
         if model_kwargs is None:
             model_kwargs = {}
         if noise is None:
-            noise = th.randn_like(x_start)
+            noise = th.randn_like(x_start) + x_end
+            #renormalize noise to have zero mean and unit variance
+            noise = (noise - noise.mean(dim=0)) / noise.std(dim=0)
+            
         x_t = self.q_sample(x_start, x_end, t, noise=noise)
 
         terms = {}
@@ -767,7 +772,6 @@ class GaussianDiffusion:
             terms["loss"] = self._vb_terms_bpd(
                 model=model,
                 x_start=x_start,
-                x_end=x_end,  # Add x_end here
                 x_t=x_t,
                 t=t,
                 clip_denoised=False,
@@ -791,7 +795,6 @@ class GaussianDiffusion:
                 terms["vb"] = self._vb_terms_bpd(
                     model=lambda *args, r=frozen_out: r,
                     x_start=x_start,
-                    x_end=x_end,  # Add x_end here
                     x_t=x_t,
                     t=t,
                     clip_denoised=False,
@@ -803,7 +806,7 @@ class GaussianDiffusion:
 
             target = {
                 ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                    x_start=x_start, x_end=x_end, x_t=x_t, t=t
+                    x_start=x_start, x_t=x_t, t=t
                 )[0],
                 ModelMeanType.START_X: x_start,
                 ModelMeanType.EPSILON: noise,

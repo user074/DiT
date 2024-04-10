@@ -248,6 +248,32 @@ def main(args):
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
+    # Setup data:
+    # transform = transforms.Compose([
+    #     transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
+    #     transforms.RandomHorizontalFlip(),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    # ])
+    # dataset = ImageFolder(args.data_path, transform=transform)
+    # sampler = DistributedSampler(
+    #     dataset,
+    #     num_replicas=dist.get_world_size(),
+    #     rank=rank,
+    #     shuffle=True,
+    #     seed=args.global_seed
+    # )
+    # loader = DataLoader(
+    #     dataset,
+    #     batch_size=int(args.global_batch_size // dist.get_world_size()),
+    #     shuffle=False,
+    #     sampler=sampler,
+    #     num_workers=args.num_workers,
+    #     pin_memory=True,
+    #     drop_last=True
+    # )
+    # logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
+
     # Setup COCO dataset:
     transform = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
@@ -304,18 +330,10 @@ def main(args):
             #doing y, x since I want to use image to predict segmentation mask
             loss_dict = diffusion.training_losses(model, x, y, t, model_kwargs) #added y as input to the model
             loss = loss_dict["loss"].mean()
-            # opt.zero_grad()
-            # loss.backward()
-            # opt.step()
-            # update_ema(ema, model.module)
-            
-            #update loss with acculated gradients
-            loss = loss / args.gradient_accumulation_steps
+            opt.zero_grad()
             loss.backward()
-            if train_steps % args.gradient_accumulation_steps == 0:
-                opt.step()
-                opt.zero_grad()
-                update_ema(ema, model.module)
+            opt.step()
+            update_ema(ema, model.module)
 
             # Log loss values:
             running_loss += loss.item()
@@ -349,32 +367,21 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
-        
-        # Evaluate the model on arg.evaluate_epoch
-        if (epoch + 1) % args.evaluate_epoch == 0:
-            model.eval()
-            # Evaluate the model
-            
-            # Save the model
-            model.train()
-            
-
-    # Save final DiT checkpoint:
-    if rank == 0:
-        checkpoint = {
-            "model": model.module.state_dict(),
-            "ema": ema.state_dict(),
-            "opt": opt.state_dict(),
-            "args": args
-        }
-        checkpoint_path = f"{checkpoint_dir}/final.pt"
-        torch.save(checkpoint, checkpoint_path)
-        logger.info(f"Saved final checkpoint to {checkpoint_path}")
-
+            elif epoch == args.epochs - 1 and train_steps % int(len(dataset)/ args.global_batch_size) == 0:
+                if rank == 0:
+                    checkpoint = {
+                        "model": model.module.state_dict(),
+                        "ema": ema.state_dict(),
+                        "opt": opt.state_dict(),
+                        "args": args
+                    }
+                    checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
+                    torch.save(checkpoint, checkpoint_path)
+                    logger.info(f"Saved checkpoint to {checkpoint_path}")
+                dist.barrier()
 
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
-
 
     logger.info("Done!")
     cleanup()
@@ -390,7 +397,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
     parser.add_argument("--global-batch-size", type=int, default=256)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
     parser.add_argument("--num-workers", type=int, default=4)
@@ -399,6 +405,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(args)
 
-#torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 100 --gradient-accumulation-steps 4 --ckpt-every 18400 --data-path /home/jqi/Github/Data/Data/coco
+#torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 100 --data-path /home/jqi/Github/Data/Data/coco
     
-#nohup torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 20 --ckpt-every 18400 --data-path /home/jqi/Github/Data/Data/coco > output.log 2>&1 &
+#nohup torchrun --nnodes=1 --nproc_per_node=1 train_img.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 20 --ckpt-every 18400 --data-path /home/jqi/Github/Data/Data/coco > output.log 2>&1 &

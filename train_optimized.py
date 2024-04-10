@@ -30,10 +30,16 @@ import numpy as np
 import cv2
 import random
 
+from utils import ImageNetandMask, RandomResizedCropAndFlip
 
 from models import DiT_models
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
+
+from torchvision.utils import make_grid
+from torchvision.transforms import Grayscale
+
+import wandb
 
 
 #################################################################################
@@ -110,92 +116,37 @@ def center_crop_arr(pil_image, image_size):
 #                                  Dataset Setup                                #
 #################################################################################
 
+class EncodedImageNetandMask(Dataset):
+    def __init__(self, encoded_image_dir, encoded_mask_dir):
+        self.encoded_image_dir = encoded_image_dir
+        self.encoded_mask_dir = encoded_mask_dir
+        self.samples = []  # A list of tuples (encoded_image_path, encoded_mask_path, class_index)
+        self.class_names = []  # Assuming same structure for both encoded_image_dir and encoded_mask_dir
 
-class COCOSegmentationDataset(Dataset):
-    def __init__(self, root_dir, split='train2017', transform=None):
-        self.root_dir = root_dir
-        self.split = split
-        self.transform = transform
-        self.image_dir = os.path.join(root_dir, 'images', split)
-        self.annotation_dir = os.path.join(root_dir, 'labels', split)
-        self.image_files = sorted(os.listdir(self.image_dir))
-        # Define the COCO class names
-        coco_classes = [
-            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
-            'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
-            'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-            'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
-            'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-            'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-            'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
-            'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
-            'hair drier', 'toothbrush'
-        ]
+        for class_name in sorted(os.listdir(encoded_image_dir)):
+            encoded_image_class_dir = os.path.join(encoded_image_dir, class_name)
+            encoded_mask_class_dir = os.path.join(encoded_mask_dir, class_name)
+            if not os.path.isdir(encoded_image_class_dir) or not os.path.isdir(encoded_mask_class_dir):
+                continue
+            self.class_names.append(class_name)
+            class_index = self.class_names.index(class_name)
 
-        # Generate unique colors for each class
-        np.random.seed(42)
-        self.coco_colors = {}
-        for i in range(len(coco_classes)):
-            self.coco_colors[i] = tuple(np.random.randint(0, 256, size=3).tolist())
+            for encoded_image_name in os.listdir(encoded_image_class_dir):
+                if encoded_image_name.endswith('.npy'):
+                    encoded_image_path = os.path.join(encoded_image_class_dir, encoded_image_name)
+                    encoded_mask_name = encoded_image_name
+                    encoded_mask_path = os.path.join(encoded_mask_class_dir, encoded_mask_name)
+                    if os.path.exists(encoded_mask_path):
+                        self.samples.append((encoded_image_path, encoded_mask_path, class_index))
 
     def __len__(self):
-        return len(self.image_files)
+        return len(self.samples)
 
-    def __getitem__(self, index):
-        image_file = self.image_files[index]
-        image_path = os.path.join(self.image_dir, image_file)
-        annotation_file = image_file.replace('.jpg', '.txt')
-        annotation_path = os.path.join(self.annotation_dir, annotation_file)
-
-        image = Image.open(image_path).convert('RGB')
-        original_width, original_height = image.size
-        
-        annotations = []
-        if os.path.exists(annotation_path):
-            with open(annotation_path, 'r') as f:
-                annotation_data = f.read().strip().split('\n')
-                for line in annotation_data:
-                    class_id, *coords = line.split()
-                    class_id = int(class_id)
-                    coords = np.array(coords, dtype=np.float32).reshape(-1, 2)
-                    coords[:, 0] *= original_width
-                    coords[:, 1] *= original_height
-                    annotations.append((class_id, coords))
-
-        # Create a segmentation mask from the annotations
-        mask = np.zeros((original_height, original_width, 3), dtype=np.uint8)
-        for class_id, coords in annotations:
-            color = self.coco_colors[class_id]
-            coords = coords.astype(np.int32)
-            mask = cv2.drawContours(mask, [coords], -1, color, -1)
-
-         # Convert the mask to an image
-        mask = Image.fromarray(mask)
-
-        # Apply the transform to the image
-        if self.transform:
-            image, mask = self.transform(image, mask)
-            
-        return image, mask
-
-# def custom_collate(batch):
-#     images = [item[0] for item in batch]
-#     annotations = [item[1] for item in batch]
-    
-#     # Pad images to the same size
-#     padded_images = torch.nn.utils.rnn.pad_sequence(images, batch_first=True)
-    
-#     return padded_images, annotations
-
-class SimultaneousTransform:
-    def __init__(self, transform):
-        self.transform = transform
-
-    def __call__(self, image, mask):
-        if random.random() < 0.5:
-            image = transforms.functional.hflip(image)
-            mask = transforms.functional.hflip(mask)
-        return self.transform(image), self.transform(mask)
+    def __getitem__(self, idx):
+        encoded_image_path, encoded_mask_path, class_index = self.samples[idx]
+        encoded_image = np.load(encoded_image_path)
+        encoded_mask = np.load(encoded_mask_path)
+        return (encoded_image, encoded_mask), class_index
     
 #################################################################################
 #                                  Training Loop                                #
@@ -248,13 +199,7 @@ def main(args):
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
-    # Setup COCO dataset:
-    transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
-    dataset = COCOSegmentationDataset(root_dir=args.data_path, split='train2017', transform=SimultaneousTransform(transform))
+    dataset = EncodedImageNetandMask(encoded_image_dir=args.data_path, encoded_mask_dir=args.mask_path)
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -274,6 +219,47 @@ def main(args):
     )
     logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
 
+    #wandb setup
+    wandb.init(project="DiT-condition-noise", config=args)
+    wandb.watch(model)
+
+    #Setup the val images 
+    transform_val = RandomResizedCropAndFlip(input_size=256)
+    dataset_val = ImageNetandMask(os.path.join('/home/jqi/Github/Data/imagenet_100/imagenet100', 'val'), os.path.join('/home/jqi/Github/Data/imagenet_100/imagenet100_masks', 'val'), transform=transform_val)
+    loader_val = DataLoader(dataset_val, batch_size=4, shuffle=True)
+    mask_transform = Grayscale(num_output_channels=1)
+
+
+    for i, ((images, masks), class_indices) in enumerate(loader_val):
+        val_images = images.to(device)
+        val_masks = masks.to(device)
+        
+        # Create a grid of 4 images for comparison
+        image_grid = make_grid(val_images, nrow=4, normalize=True, value_range=(-1, 1))
+        mask_grid = make_grid(val_masks, nrow=4, normalize=True, value_range=(-1, 1))
+        image_grid = image_grid.permute(1, 2, 0).cpu().numpy()
+        mask_grid = mask_transform(mask_grid).permute(1, 2, 0).cpu().numpy()
+
+        # Log the image and mask grids to wandb
+        wandb.log({
+            "val_masks": wandb.Image(mask_grid),
+            "val_images": wandb.Image(image_grid)
+        })
+        break
+    del loader_val
+    del dataset_val
+    del transform_val
+
+    #Create latent masks
+    z = vae.encode(val_masks).latent_dist.sample().mul_(0.18215)
+    z = torch.cat([z, z], 0)
+    y = torch.tensor(class_indices, device=device)
+    y_null = torch.tensor([100] * 4, device=device)
+    y = torch.cat([y, y_null], 0)
+    val_model_kwargs = dict(y=y, cfg_scale=4.0)
+
+
+
     # Prepare models for training:
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
@@ -285,29 +271,22 @@ def main(args):
     running_loss = 0
     start_time = time()
 
+    
+    
+
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, y in loader:
-            x = x.to(device)
-            y = y.to(device)
-            #Here I modify the y as the input to the model
-            with torch.no_grad():
-                # Map input images to latent space + normalize latents:
-                x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-                y = vae.encode(y).latent_dist.sample().mul_(0.18215)
-
-            t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(y= torch.ones(x.shape[0], dtype=torch.long, device=device))
+        for (encoded_images, encoded_masks), class_indices in loader:
+            encoded_images = encoded_images.to(device)
+            encoded_masks = encoded_masks.to(device)
+            t = torch.randint(0, diffusion.num_timesteps, (encoded_images.shape[0],), device=device)
+            model_kwargs = dict(y= class_indices)
             # model_kwargs = None
             #doing y, x since I want to use image to predict segmentation mask
-            loss_dict = diffusion.training_losses(model, x, y, t, model_kwargs) #added y as input to the model
+            loss_dict = diffusion.training_losses(model, encoded_images, encoded_masks, t, model_kwargs) #added y as input to the model
             loss = loss_dict["loss"].mean()
-            # opt.zero_grad()
-            # loss.backward()
-            # opt.step()
-            # update_ema(ema, model.module)
             
             #update loss with acculated gradients
             loss = loss / args.gradient_accumulation_steps
@@ -331,33 +310,43 @@ def main(args):
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+
+                #wandb logging
+                wandb.log({"train_loss": avg_loss, "steps_per_sec": steps_per_sec}, step=train_steps)
+            
                 # Reset monitoring variables:
                 running_loss = 0
                 log_steps = 0
                 start_time = time()
 
-            # Save DiT checkpoint:
-            if train_steps % args.ckpt_every == 0 and train_steps > 0:
-                if rank == 0:
-                    checkpoint = {
-                        "model": model.module.state_dict(),
-                        "ema": ema.state_dict(),
-                        "opt": opt.state_dict(),
-                        "args": args
-                    }
-                    checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
-                    torch.save(checkpoint, checkpoint_path)
-                    logger.info(f"Saved checkpoint to {checkpoint_path}")
-                dist.barrier()
+        # Save DiT checkpoint (changed to epochs):
+        if epoch % args.ckpt_every == 0 and epoch > 0:
+            if rank == 0:
+                checkpoint = {
+                    "model": model.module.state_dict(),
+                    "ema": ema.state_dict(),
+                    "opt": opt.state_dict(),
+                    "args": args
+                }
+                checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
+                torch.save(checkpoint, checkpoint_path)
+                logger.info(f"Saved checkpoint to {checkpoint_path}")
+            dist.barrier()
         
-        # Evaluate the model on arg.evaluate_epoch
-        if (epoch + 1) % args.evaluate_epoch == 0:
-            model.eval()
-            # Evaluate the model
-            
-            # Save the model
-            model.train()
-            
+        #Validation
+        if epoch % args.val_epoch == 0 and train_steps > 0:
+            # model.eval()
+            with torch.no_grad():
+                samples = diffusion.p_sample_loop(
+                    ema.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=val_model_kwargs, progress=True, device=device
+                )
+                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+                samples = vae.decode(samples / 0.18215).sample
+                sample_grid = make_grid(samples, nrow=4, normalize=True, value_range=(-1, 1))
+                sample_grid = sample_grid.permute(1, 2, 0).cpu().numpy()
+                wandb.log({"val_samples": wandb.Image(sample_grid)}, step=train_steps)
+            # model.train()
+
 
     # Save final DiT checkpoint:
     if rank == 0:
@@ -384,11 +373,13 @@ if __name__ == "__main__":
     # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
+    parser.add_argument("--mask-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
+    parser.add_argument("--val-epoch", type=int, default=50)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--global-seed", type=int, default=0)
@@ -399,6 +390,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(args)
 
-#torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 100 --gradient-accumulation-steps 4 --ckpt-every 18400 --data-path /home/jqi/Github/Data/Data/coco
+#tmux command
+#torchrun --nnodes=1 --nproc_per_node=1 train_optimized.py --model DiT-S/4 --num-classes 100 --global-batch-size 256 --epochs 1400 --gradient-accumulation-steps 4 --num-workers 32 --ckpt-every 100 --data-path /home/jqi/Github/Data/imagenet_100/encoded_imagenet100 --mask-path /home/jqi/Github/Data/imagenet_100/encoded_imagenet100_masks > output.log 2>&1
     
-#nohup torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 20 --ckpt-every 18400 --data-path /home/jqi/Github/Data/Data/coco > output.log 2>&1 &
+#nohup torchrun --nnodes=1 --nproc_per_node=1 train.py --model DiT-S/8 --num-classes 1 --global-batch-size 32 --epochs 20 --ckpt-every 10 --data-path /home/jqi/Github/Data/Data/coco > output.log 2>&1 &
